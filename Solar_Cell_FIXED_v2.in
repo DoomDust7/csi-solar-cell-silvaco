@@ -1,0 +1,163 @@
+# Silicon n+/p/p+ solar cell
+
+# Ideal full-area ohmic electrical boundaries; no physical metal shading.
+# No ARC, texture, rear reflector, series resistance or explicit passivation.
+# Planar 1-um-wide slice, default 2D out-of-plane normalization.
+
+go victorydevice simflags="-32"
+
+#########################################
+# Specify cell structure
+#########################################
+# Length: um; doping: cm^-3; lifetime: s
+
+# Define Cell Parameters
+set cell_width_um = 1
+set cell_depth_um = 1
+
+set Emitter_thick= 0.5
+set Absorber_thick = 150
+set BSF_thick = 0.5
+set Dop_emitter = 5e19
+set Dop_absorber = 5e16
+set Dop_BSF = 5e16
+set Emitter="n.type"
+set Absorber="p.type"
+set BSF="p.type"
+
+# Define Material Parameters
+set tau_emitter=1e-3
+set tau_absorber=1e-3
+set tau_BSF=1e-3
+
+# Define integrated input power density and maximum voltage
+set Pin_mW_cm2 = 100
+set Va_max = 1
+# DEVIATION (logged in results.md): sweep steps exposed as set values so p+nn+ (negative Va_max) can run
+set Vstep_dark = 0.01
+set Vstep_light = -0.01
+
+##### (A) MESH DEFINITION  #####
+mesh space.mult=1
+
+x.mesh loc=0.0 spac=0.25
+x.mesh loc=$cell_width_um spac=0.25
+
+# Resolve front junction and rear BSF transition; use coarser mesh in bulk.
+y.mesh loc=0.000 spac=0.001
+y.mesh loc=($Emitter_thick/5) spac=0.005
+y.mesh loc=(4*$Emitter_thick/5) spac=0.005
+y.mesh loc=$Emitter_thick spac=0.001
+y.mesh loc=(6*$emitter_thick/5) spac=0.002
+y.mesh loc=($emitter_thick + $Absorber_Thick/2) spac=0.1
+y.mesh loc=($emitter_thick + 2*$Absorber_Thick/3) spac=0.05
+y.mesh loc=($emitter_thick + $Absorber_Thick - $BSF_thick) spac=0.01
+y.mesh loc=($emitter_thick + $Absorber_Thick) spac=0.01
+y.mesh loc=($emitter_thick + $Absorber_Thick + $BSF_thick) spac=0.01
+
+# ##### (B) Regions Specification #####
+region num=1 material=Silicon y.min=0 y.max=$Emitter_thick
+region num=2 material=Silicon y.min=$Emitter_Thick y.max=$Emitter_thick + $Absorber_thick
+region num=3 material=Silicon y.min=$Emitter_Thick + $Absorber_thick \
+                              y.max=$Emitter_thick + $Absorber_thick + $BSF_thick
+
+# ##### (C) Specify Doping #####
+doping uniform region=1 $"Emitter" conc=$Dop_emitter
+doping uniform region=2 $"Absorber" conc=$Dop_absorber
+doping uniform region=3 $"BSF" conc=$Dop_BSF
+
+# ##### (D) Material Properties #####
+material region=1 taun0=$tau_emitter taup0=$tau_emitter
+material region=2 taun0=$tau_absorber taup0=$tau_absorber
+material region=3 taun0=$tau_BSF taup0=$tau_BSF
+
+# ##### (E) Set Electrode #####
+electrode name=cathode top
+electrode name=anode bottom
+
+save outfile = cell_structure.str
+
+##### S(F) Specify contact, Models and Method #####
+contact name=anode
+models temperature=300 fermi consrh auger conmob fldmob optr print
+method block newton trap itlimit=50
+output con.band val.band band.param e.field opt.int
+
+###################################################
+#####  SOLVE FOR DARK CURRENT CHARACTERISTIC  #####
+###################################################
+solve init
+
+log outf=solar_cell_dark.log
+solve vanode=0
+solve vanode=0 vstep=$Vstep_dark vfinal=$Va_max name=anode 
+log off
+
+####################################################
+#####  SOLVE FOR LIGHT CURRENT CHARACTERISTIC  #####
+####################################################
+# The AM1.5 keyword selects the installed spectrum.
+# B1 is the beam scale factor; this deck assumes B1=1 is nominal one sun.
+beam num=1 x.origin=$cell_width_um/2 y.origin=-1.0 angle=90 \
+     POWER.FILE="AM15G_ATLAS_POWER.spec" \
+     WAVEL.START=0.28 WAVEL.END=4.0 WAVEL.NUM=745
+
+# ##### Ramp illumination ######
+solve b1=1e-6
+solve b1=1e-5
+solve b1=1e-4
+solve b1=1e-3
+solve b1=1e-2
+solve b1=0.1
+solve b1=0.5
+solve b1=1.0
+
+# decrease the anode current to Zero
+log outf=solar_cell_light.log
+solve b1=1.0
+solve name=anode vstep=$Vstep_light vfinal=0 b1=1.0
+save outf=solar_cell_light_end.str
+log off
+
+extract init infile="solar_cell_light.log"
+extract name="Isc" y.val from curve(v."anode",i."cathode") where x.val=0.0
+extract name="Jsc_mA_cm2" abs($"Isc")*1e3*1e4*1e4/$cell_depth_um/$cell_width_um
+extract name="Voc_V" x.val from curve(v."anode",i."cathode") where y.val=0.0
+extract name="Pmax_mW_cm2" \
+              max(curve(v."anode",1e3*1e4*1e4*v."anode"*i."cathode"/$cell_width_um/$cell_depth_um))
+extract name="Vmp_V" x.val from curve(v."anode",v."anode"*i."cathode"*1e11/$cell_width_um) where y.val=$"Pmax_mW_cm2"
+extract name="Jmp_mA_cm2" $"Pmax_mW_cm2"/$"Vmp_V"
+extract name="FF_percent" 100*$"Pmax_mW_cm2"/($"Voc_V"*$"Jsc_mA_cm2")
+extract name="Efficiency_percent" 100*$"Pmax_mW_cm2"/$pin_mW_cm2
+
+####################################################
+#######   CALCULATE THE SPECTRAL RESPONSE   ########
+####################################################
+go victorydevice 
+
+mesh infile=cell_structure.str
+contact name=anode
+
+
+# --- FIX: re-apply lifetimes/models (not stored in .str) and run the wavelength sweep ---
+material region=1 taun0=$tau_emitter taup0=$tau_emitter
+material region=2 taun0=$tau_absorber taup0=$tau_absorber
+material region=3 taun0=$tau_BSF taup0=$tau_BSF
+models temperature=300 fermi consrh auger conmob fldmob optr print
+method block newton trap itlimit=50
+solve init
+beam num=2 x.origin=$cell_width_um/2 y.origin=-1.0 angle=90
+log outf=spectral_response.log
+solve b2=1 beam=2 lambda1=0.30 wstep=0.02 wfinal=1.20
+log off
+
+extract init infile="spectral_response.log"
+extract name="IQE" curve(ow."2", -i."anode"/apc."2")\
+        outfile="IQE.dat"
+extract name="EQE" curve(ow."2", -i."anode"/spc."2") \
+        outfile="EQE.dat"
+extract name="EQE2" curve(elect."optical wavelength", \
+    -   (i."anode")/elect."source photo current" \
+         *elect."Absorption") outfile="EQE2.dat"
+
+quit
